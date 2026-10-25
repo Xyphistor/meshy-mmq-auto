@@ -186,6 +186,16 @@ Meshy.prototype.generateUI = function() {
   this.measureConvexHull = false;
   this.buildMeasurementFolder();
 
+  // automatic dressmaker's measurements
+  this.autoMeasure = null;
+  this.autoMeasureValues = {};
+  this.autoMeasureLandmark = "";
+  this.autoMeasureShowTapes = true;
+  this.autoMeasureName = "";
+  this.autoMeasureFolder = this.gui.addFolder("Auto Measure",
+    "Automatic dressmaker's measurements of an upright torso scan, front facing -y.");
+  this.buildAutoMeasureFolder();
+
   var thicknessFolder = this.gui.addFolder("Mesh Thickness", "Visualize approximate local mesh thickness.");
   this.thicknessThreshold = 1.0;
   thicknessFolder.add(this, "thicknessThreshold", 0).name("Threshold")
@@ -1443,6 +1453,284 @@ Meshy.prototype.addMeasurement = function(params) {
   this.buildScaleToMeasurementFolder();
   this.onSetCurrentMeasurement();
 }
+Meshy.prototype.buildAutoMeasureFolder = function() {
+  this.clearFolder(this.autoMeasureFolder);
+
+  this.autoMeasureFolder.add(this, "autoMeasureRun").name("Measure")
+    .title("Find the landmarks and measure the torso.");
+
+  if (!this.autoMeasure) return;
+
+  var landmarks = { "(choose)": "" };
+  for (var key in AutoMeasure.LandmarkNames) {
+    landmarks[AutoMeasure.LandmarkNames[key]] = key;
+  }
+
+  this.autoMeasureFolder.add(this, "autoMeasureLandmark", landmarks).name("Move landmark")
+    .title("Choose a landmark, then click on the model where it should be.")
+    .onChange(this.onAutoMeasureLandmark.bind(this));
+  this.autoMeasureFolder.add(this, "autoMeasureShowTapes").name("Show tapes")
+    .title("Show the tapes for each measurement on the model.")
+    .onChange(this.autoMeasureDraw.bind(this));
+  this.autoMeasureFolder.add(this, "autoMeasureName").name("Report name")
+    .title("Name shown on the report, e.g. the customer or job.");
+  this.autoMeasureFolder.add(this, "autoMeasurePrintReport").name("Print report")
+    .title("Open a printable report of the measurements in cm.");
+  this.autoMeasureFolder.add(this, "autoMeasureClear").name("Clear")
+    .title("Remove the automatic measurements.");
+}
+Meshy.prototype.autoMeasureRun = function() {
+  if (this.sliceModeOn) {
+    this.printout.warn("Cannot measure mesh while slice mode is on.");
+    return;
+  }
+
+  if (!this.model) {
+    this.printout.warn("Import a scan to measure.");
+    return;
+  }
+
+  var sliceMesh, landmarks;
+
+  try {
+    sliceMesh = new AutoMeasure.SliceMesh(this.model.getMesh());
+    landmarks = AutoMeasure.findLandmarks(sliceMesh);
+  }
+  catch (e) {
+    this.printout.error(e.message);
+    return;
+  }
+
+  this.autoMeasureClear();
+
+  this.autoMeasure = {
+    sliceMesh: sliceMesh,
+    landmarks: landmarks,
+    results: null,
+    list: this.infoBox.addList("autoMeasure", "Auto measurements (cm)", 0xffa040)
+  };
+
+  var list = this.autoMeasure.list;
+  AutoMeasure.Definitions.forEach(function(def) {
+    list.add(def.name, this, ["autoMeasureValues", def.key]);
+  }, this);
+
+  if (!this.autoMeasureName) this.autoMeasureName = this.filename;
+
+  this.autoMeasureUpdate();
+  this.buildAutoMeasureFolder();
+
+  this.printout.log("Measured. Choose a landmark under Move landmark to adjust it.");
+}
+// recalculate the measurements from the current landmarks
+Meshy.prototype.autoMeasureUpdate = function() {
+  var am = this.autoMeasure;
+  if (!am) return;
+
+  am.results = AutoMeasure.measure(am.sliceMesh, am.landmarks);
+
+  var values = {};
+  am.results.forEach(function(result) {
+    values[result.key] = result.value === null ? "-" : (result.value / 10).toFixed(1);
+  });
+  this.autoMeasureValues = values;
+
+  am.list.update();
+
+  this.autoMeasureDraw();
+}
+Meshy.prototype.autoMeasureDraw = function() {
+  this.autoMeasureRemoveMarkers();
+
+  var am = this.autoMeasure;
+  if (!am) return;
+
+  var scene = this.scene;
+  var name = "autoMeasureMarker";
+
+  if (this.autoMeasureShowTapes) {
+    am.results.forEach(function(result) {
+      if (result.segments.length === 0) return;
+
+      var color = result.group === "Girths" ? 0x2a7fff : 0xff6a00;
+      var marker = Markers.create(Markers.Types.contour, { name: name, color: color });
+
+      marker.setFromSegments(result.segments);
+      marker.activate();
+      marker.addToScene(scene);
+    });
+  }
+
+  var moving = this.autoMeasureLandmark;
+  var radius = this.model ? this.model.getMaxSize() * 0.005 : 4;
+
+  for (var key in am.landmarks) {
+    if (!am.landmarks[key] || !am.landmarks[key].isVector3) continue;
+
+    var marker = Markers.create(Markers.Types.sphere, {
+      name: name,
+      color: key === moving ? 0xffee00 : 0xff2050
+    });
+
+    marker.setPosition(am.landmarks[key]);
+    marker.setRadius(key === moving ? radius * 2 : radius);
+    marker.activate();
+    marker.addToScene(scene);
+  }
+}
+Meshy.prototype.autoMeasureRemoveMarkers = function() {
+  for (var i = this.scene.children.length - 1; i >= 0; i--) {
+    if (this.scene.children[i].name === "autoMeasureMarker") {
+      this.scene.remove(this.scene.children[i]);
+    }
+  }
+}
+Meshy.prototype.onAutoMeasureLandmark = function() {
+  var key = this.autoMeasureLandmark;
+  var pointer = this.pointer;
+  var _this = this;
+
+  if (!key) {
+    this.autoMeasureEndMove();
+    return;
+  }
+
+  this.printout.log("Click on the model to place: " + AutoMeasure.LandmarkNames[key] + ".");
+
+  pointer.addCallback("autoMeasure", function(intersection) {
+    _this.autoMeasure.landmarks[key] = intersection.point.clone();
+    _this.autoMeasureEndMove();
+    _this.autoMeasureUpdate();
+  });
+  pointer.activate();
+
+  this.autoMeasureDraw();
+}
+Meshy.prototype.autoMeasureEndMove = function() {
+  var pointer = this.pointer;
+
+  // only turn the pointer off if nothing else is using it
+  if (pointer.removeCallback("autoMeasure") && Object.keys(pointer.callbacks).length === 0) {
+    pointer.deactivate();
+  }
+
+  this.autoMeasureLandmark = "";
+  this.buildAutoMeasureFolder();
+  this.autoMeasureDraw();
+}
+Meshy.prototype.autoMeasureClear = function() {
+  if (this.autoMeasure) {
+    this.infoBox.removeList(this.autoMeasure.list);
+    this.autoMeasure = null;
+    this.autoMeasureEndMove();
+  }
+
+  this.autoMeasureRemoveMarkers();
+  this.autoMeasureValues = {};
+  this.buildAutoMeasureFolder();
+}
+Meshy.prototype.autoMeasurePrintReport = function() {
+  var am = this.autoMeasure;
+  if (!am) return;
+
+  var html = AutoMeasure.reportHTML({
+    name: this.autoMeasureName,
+    filename: this.filename,
+    results: am.results,
+    images: this.autoMeasureCaptureViews()
+  });
+
+  // show the report over the viewport, with buttons to print it or close it
+  var overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.7);" +
+    "display:flex;flex-direction:column;align-items:center;padding:12px;box-sizing:border-box;";
+
+  var toolbar = document.createElement("div");
+  toolbar.style.cssText = "display:flex;gap:8px;margin-bottom:8px;";
+
+  var frame = document.createElement("iframe");
+  frame.style.cssText = "flex:1;width:100%;max-width:230mm;border:0;background:#fff;";
+  frame.srcdoc = html;
+
+  function button(label, onClick) {
+    var b = document.createElement("button");
+    b.textContent = label;
+    b.style.cssText = "padding:6px 18px;font-size:14px;cursor:pointer;";
+    b.onclick = onClick;
+    toolbar.appendChild(b);
+  }
+
+  button("Print", function() { frame.contentWindow.print(); });
+  button("Close", function() { document.body.removeChild(overlay); });
+
+  overlay.appendChild(toolbar);
+  overlay.appendChild(frame);
+  document.body.appendChild(overlay);
+}
+// render front, side, and back views of the model with the tapes, on a white
+// background; returns an array of { name, url }
+Meshy.prototype.autoMeasureCaptureViews = function() {
+  var renderer = this.renderer;
+  var camera = this.camera;
+  var controls = this.controls;
+  var scene = this.scene;
+
+  var saved = {
+    r: controls.r,
+    phi: controls.phi,
+    theta: controls.theta,
+    origin: controls.origin.clone(),
+    aspect: camera.aspect,
+    background: scene.background,
+    pixelRatio: renderer.getPixelRatio()
+  };
+
+  // hide everything except the model and the measurement markers
+  var hidden = [];
+  scene.traverse(function(o) {
+    if (o.visible && (o.name === "buildVolume" || (this.pointer.cursor && o === this.pointer.cursor.object))) {
+      o.visible = false;
+      hidden.push(o);
+    }
+  }.bind(this));
+
+  var width = 500, height = 900;
+  var size = this.model.getSize();
+  var center = this.model.getCenter();
+  var halfFov = camera.fov * Math.PI / 360;
+  var r = Math.max(size.z / 2, size.x / 2 * height / width) * 1.08 / Math.tan(halfFov) + Math.max(size.x, size.y) / 2;
+
+  renderer.setPixelRatio(1);
+  renderer.setSize(width, height, false);
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+  scene.background = new THREE.Color(0xffffff);
+
+  var views = [
+    { name: "Front", phi: -Math.PI / 2 },
+    { name: "Side", phi: 0 },
+    { name: "Back", phi: Math.PI / 2 }
+  ];
+
+  var images = views.map(function(view) {
+    controls.update({ origin: center, r: r, phi: view.phi, theta: Math.PI / 2 });
+    renderer.clear();
+    renderer.render(scene, camera);
+
+    return { name: view.name, url: renderer.domElement.toDataURL("image/png") };
+  });
+
+  // restore the viewport
+  hidden.forEach(function(o) { o.visible = true; });
+  scene.background = saved.background;
+  renderer.setPixelRatio(saved.pixelRatio);
+  renderer.setSize(this.container.offsetWidth, this.container.offsetHeight);
+  camera.aspect = saved.aspect;
+  camera.updateProjectionMatrix();
+  controls.update({ origin: saved.origin, r: saved.r, phi: saved.phi, theta: saved.theta });
+
+  return images;
+}
 Meshy.prototype.forEachMeasurement = function(fn) {
   for (var m = 0; m < this.measurementData.length; m++) {
     fn(this.measurementData[m], m);
@@ -2359,6 +2647,7 @@ Meshy.prototype.delete = function() {
   this.endSliceMode();
 
   this.removeAllMeasurements();
+  this.autoMeasureClear();
   this.endSetBase();
 
   this.editStack.clear();
