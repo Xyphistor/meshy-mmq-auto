@@ -1068,7 +1068,7 @@ Meshy.prototype.buildMeasurementFolder = function() {
   this.measurementFolder.add(this, "measureLength").name("Length")
     .title("Measure point-to-point length.");
   this.measurementFolder.add(this, "measureContour").name("Contour")
-    .title("Measure point-to-point length following surface contour.");
+    .title("Measure length along the surface: click start, end, and via points. Uses the convex hull setting.");
   this.measurementFolder.add(this, "measureAngle").name("Angle")
     .title("Measure angle (in degrees) between two segments formed by three consecutive points.");
   this.measurementFolder.add(this, "measureCircle").name("Circle")
@@ -1087,7 +1087,7 @@ Meshy.prototype.buildMeasurementFolder = function() {
   this.measurementFolder.add(this, "measureLocalCrossSection").name("Local cross-section")
     .title("Measure the cross-section of a single part of the mesh.");
   this.measurementFolder.add(this, "measureConvexHull").name("Convex hull")
-    .title("Compute the convex hull for cross-sections.")
+    .title("Compute the convex hull for cross-sections and contours.")
     .onChange(this.onToggleConvexHull.bind(this));
 
   this.crossSectionArrayAxis = "z";
@@ -1229,13 +1229,8 @@ Meshy.prototype.measureLength = function() {
 }
 Meshy.prototype.measureContour = function() {
   this.addMeasurement({
-  type: Measurement.Types.contour,
-  nearestContour: true,
-  convexHull: this.measureConvexHull,
-  // todo: remove
-  calculateManually: this.calculateManually,
-  showPreviewMarker: this.showPreviewMarker,
-  previewMarkerRadiusOffset: this.previewMarkerRadiusOffset
+    type: Measurement.Types.contour,
+    convexHull: this.measureConvexHull
   });
 }
 Meshy.prototype.measureAngle = function() {
@@ -1388,9 +1383,8 @@ Meshy.prototype.addMeasurement = function(params) {
   }
   else if (type === Measurement.Types.contour) {
     item.list = this.infoBox.addList(item.measurement.uuid, "Contour", params.color);
-    item.list.add("Contour length 1", item, ["result", "length1"]);
-    item.list.add("Contour length 2", item, ["result", "length2"]);
-    item.list.add("Contour length 3", item, ["result", "length3"]);
+    item.list.add("Contour length", item, ["result", "length"]);
+    item.list.add("Straight length", item, ["result", "straightLength"]);
   }
   else if (type === Measurement.Types.angle) {
     item.list = this.infoBox.addList(item.measurement.uuid, "Angle", params.color);
@@ -1478,9 +1472,7 @@ Meshy.prototype.buildScaleToMeasurementFolder = function() {
     addScalableMeasurement("length");
   }
   else if (type === Measurement.Types.contour) {
-    addScalableMeasurement("length1");
-    addScalableMeasurement("length2");
-    addScalableMeasurement("length3");
+    addScalableMeasurement("length");
   }
   else if (type === Measurement.Types.circle) {
     addScalableMeasurement("radius");

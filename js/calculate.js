@@ -560,6 +560,323 @@ var Calculate = (function() {
     };
   }
 
+  // calculates the path along the surface of the mesh between two points, in
+  // the plane through those two points and a third "via" point; the path
+  // follows the cross-section contour from start to end, going the way around
+  // that passes through the via point
+  // arguments:
+  //  mesh: THREE.Mesh
+  //  start, via, end: THREE.Vector3 points on the surface of the mesh
+  //  convexHull: if true, pull the path taut over the outside of the contour,
+  //    bridging concavities as a tape measure would
+  // returns an object like { points, segments, boundingBox, length, closed },
+  // or null if no path exists
+  function _surfacePath(mesh, start, via, end, convexHull) {
+    var normal = new Vector3().subVectors(via, start);
+    normal.cross(new Vector3().subVectors(end, start)).normalize();
+
+    // if the points are collinear, the plane is undefined
+    if (normal.length() === 0) return null;
+
+    var plane = new Plane().setFromNormalAndCoplanarPoint(normal, start);
+
+    // store the segments forming the intersection
+    var segments = [];
+
+    _traverseFaces(mesh, function(va, vb, vc, faceNormal) {
+      var segment = _planeTriangleIntersection(plane, va, vb, vc, faceNormal);
+
+      // nonzero contribution if plane intersects face
+      if (segment !== null) segments.push(segment);
+    });
+
+    var chains = _chainsFromSegments(segments);
+    var targets = [start, via, end];
+
+    // find the chain closest to the three points and locate them on it
+    var chain = null;
+    var locations = null;
+    var minDist = Infinity;
+
+    for (var c = 0, lc = chains.length; c < lc; c++) {
+      var chainLocations = [];
+      var dist = 0;
+
+      for (var t = 0; t < 3; t++) {
+        var location = _locateOnChain(chains[c], targets[t]);
+
+        chainLocations.push(location);
+        dist += location.distance;
+      }
+
+      if (dist < minDist) {
+        chain = chains[c];
+        locations = chainLocations;
+        minDist = dist;
+      }
+    }
+
+    if (chain === null) return null;
+
+    var ls = locations[0];
+    var lv = locations[1];
+    var le = locations[2];
+
+    // determine which way along the chain to go from start to end; on a
+    // closed chain, go forward if the via point comes before the end point
+    var forward;
+
+    if (chain.closed) {
+      var dEnd = _mod(le.distanceAlong - ls.distanceAlong, chain.length);
+      var dVia = _mod(lv.distanceAlong - ls.distanceAlong, chain.length);
+
+      forward = dVia <= dEnd;
+    }
+    else {
+      forward = le.distanceAlong >= ls.distanceAlong;
+    }
+
+    var points = _chainPortion(chain, ls, le, forward);
+
+    // chains are wound CCW about the plane normal, so the mesh interior is on
+    // the left going forward and on the right going backward
+    if (convexHull) points = _tautPath(points, normal, forward ? 1 : -1);
+
+    var pathSegments = [];
+    var boundingBox = new Box3();
+    var length = 0;
+
+    for (var p = 0, lp = points.length; p < lp; p++) {
+      boundingBox.expandByPoint(points[p]);
+
+      if (p > 0) {
+        pathSegments.push(new Line3(points[p - 1], points[p]));
+        length += points[p - 1].distanceTo(points[p]);
+      }
+    }
+
+    return {
+      points: points,
+      segments: pathSegments,
+      boundingBox: boundingBox,
+      length: length,
+      closed: chain.closed
+    };
+  }
+
+  // non-negative remainder of a / n
+  function _mod(a, n) {
+    return ((a % n) + n) % n;
+  }
+
+  // like _polygonsFromSegments, but also keeps open chains (e.g., where the
+  // plane passes through a hole in the mesh); returns an array of chains, as
+  // made by _makeChain
+  function _chainsFromSegments(segments, p) {
+    p = p !== undefined ? p : 1e5;
+
+    var n = segments.length;
+    var startHashes = [];
+    var endHashes = [];
+    var used = [];
+
+    // maps from vertex hashes to the indices of segments starting/ending there
+    var startMap = {};
+    var endMap = {};
+
+    for (var s = 0; s < n; s++) {
+      var startHash = _vectorHash(segments[s].start, p);
+      var endHash = _vectorHash(segments[s].end, p);
+
+      startHashes.push(startHash);
+      endHashes.push(endHash);
+
+      // segments too short to hash to two different values are skipped
+      used.push(startHash === endHash);
+
+      if (startHash === endHash) continue;
+
+      (startMap[startHash] = startMap[startHash] || []).push(s);
+      (endMap[endHash] = endMap[endHash] || []).push(s);
+    }
+
+    function nextUnused(indices) {
+      if (indices === undefined) return -1;
+
+      for (var i = 0; i < indices.length; i++) {
+        if (!used[indices[i]]) return indices[i];
+      }
+
+      return -1;
+    }
+
+    var chains = [];
+
+    for (var s = 0; s < n; s++) {
+      if (used[s]) continue;
+
+      used[s] = true;
+
+      var forwardPoints = [segments[s].start, segments[s].end];
+      var backwardPoints = [];
+      var closed = false;
+      var current, next;
+
+      // extend forward until the chain closes or runs out
+      current = s;
+      while ((next = nextUnused(startMap[endHashes[current]])) !== -1) {
+        used[next] = true;
+        current = next;
+
+        if (endHashes[current] === startHashes[s]) {
+          closed = true;
+          break;
+        }
+
+        forwardPoints.push(segments[current].end);
+      }
+
+      // if open, also extend backward from the first segment
+      if (!closed) {
+        current = s;
+        while ((next = nextUnused(endMap[startHashes[current]])) !== -1) {
+          used[next] = true;
+          current = next;
+
+          backwardPoints.push(segments[current].start);
+        }
+      }
+
+      chains.push(_makeChain(backwardPoints.reverse().concat(forwardPoints), closed));
+    }
+
+    return chains;
+  }
+
+  // make a chain object from an ordered array of points; if closed, the last
+  // point connects back to the first
+  function _makeChain(points, closed) {
+    var n = points.length;
+    var cumulative = [0];
+
+    for (var i = 1; i < n; i++) {
+      cumulative.push(cumulative[i - 1] + points[i - 1].distanceTo(points[i]));
+    }
+
+    var length = cumulative[n - 1];
+    if (closed) length += points[n - 1].distanceTo(points[0]);
+
+    return {
+      points: points,
+      closed: closed,
+      // distance along the chain to each point
+      cumulative: cumulative,
+      length: length
+    };
+  }
+
+  // find the closest point on a chain to the given point; returns an object
+  // like { index, t, point, distance, distanceAlong }, where index is the
+  // chain segment, t is the parameter along it, and distanceAlong is the
+  // distance from the start of the chain
+  function _locateOnChain(chain, point) {
+    var points = chain.points;
+    var n = points.length;
+    var segmentCount = chain.closed ? n : n - 1;
+
+    var line = new Line3();
+    var closest = new Vector3();
+
+    var result = {
+      index: 0,
+      t: 0,
+      point: points[0].clone(),
+      distance: Infinity,
+      distanceAlong: 0
+    };
+
+    for (var i = 0; i < segmentCount; i++) {
+      line.set(points[i], points[(i + 1) % n]);
+
+      var t = line.closestPointToPointParameter(point, true);
+      line.at(t, closest);
+
+      var distance = closest.distanceTo(point);
+
+      if (distance < result.distance) {
+        result.index = i;
+        result.t = t;
+        result.point.copy(closest);
+        result.distance = distance;
+        result.distanceAlong = chain.cumulative[i] + t * line.distance();
+      }
+    }
+
+    return result;
+  }
+
+  // get the points along a chain between two locations (from _locateOnChain),
+  // going forward or backward along the chain
+  function _chainPortion(chain, from, to, forward) {
+    var points = chain.points;
+    var n = points.length;
+    var result = [from.point.clone()];
+
+    var sameSegment = from.index === to.index && (forward ? from.t <= to.t : from.t >= to.t);
+
+    if (!sameSegment) {
+      // going forward, the vertices run from the end of the "from" segment to
+      // the start of the "to" segment; going backward, the reverse
+      var k = forward ? (from.index + 1) % n : from.index;
+      var last = forward ? to.index : (to.index + 1) % n;
+      var step = forward ? 1 : n - 1;
+
+      for (var i = 0; i < n; i++) {
+        result.push(points[k].clone());
+
+        if (k === last) break;
+
+        k = (k + step) % n;
+      }
+    }
+
+    result.push(to.point.clone());
+
+    return result;
+  }
+
+  // pull an open planar path taut over its convex side, as a string pinned at
+  // both ends would be, skipping across any concavities;
+  // normal is the plane normal and sign is 1 if the mesh interior is on the
+  // left of the path (viewed from the normal side), -1 if on the right
+  function _tautPath(points, normal, sign) {
+    var stack = [];
+    var a = new Vector3();
+    var b = new Vector3();
+
+    for (var i = 0, l = points.length; i < l; i++) {
+      var q = points[i];
+
+      // pop vertices where the path turns away from the interior (concave) or
+      // goes straight
+      while (stack.length >= 2) {
+        var p0 = stack[stack.length - 2];
+        var p1 = stack[stack.length - 1];
+
+        a.subVectors(p1, p0);
+        b.subVectors(q, p1);
+
+        if (sign * normal.dot(a.cross(b)) > 0) break;
+
+        stack.pop();
+      }
+
+      stack.push(q);
+    }
+
+    return stack;
+  }
+
   // calculate circle normal, center, and radius from three coplanar points:
   // take two pairs of coplanar points, calculate bisector of both pairs;
   // the bisectors will intersect at the center
@@ -688,6 +1005,7 @@ var Calculate = (function() {
     crossSection: _crossSection,
     nearestContourToPoints: _nearestContourToPoints,
     planarConvexHull: _planarConvexHull,
+    surfacePath: _surfacePath,
     circleFromThreePoints: _circleFromThreePoints
   };
 

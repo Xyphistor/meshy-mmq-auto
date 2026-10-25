@@ -81,6 +81,30 @@
 //      length: point-to-point distance
 //    }
 //
+//  Contour:
+//   distance along the surface between a start and end point, following the
+//   cross-section by the plane through start, end, and via points (placed in
+//   that order); the path goes the way around the cross-section that passes
+//   through the via point
+//
+//   params:
+//    {
+//      type: measurement type
+//      color: marker color, shared between all markers (0x2adeff by default)
+//      convexHull: if true, pull the path taut over the outside of the
+//       surface, bridging concavities as a tape measure would
+//      calculateManually: if true, don't autocalculate the measurement when
+//       enough markers have been placed; false by default (false by default)
+//    }
+//
+//   result:
+//    {
+//      ready: true if valid result
+//      length: path length along the surface (or taut over it, if convexHull)
+//      straightLength: straight-line distance from start to end
+//      boundingBox: bounding box of the path (THREE.Box3)
+//    }
+//
 //  Angle:
 //   angle between three consecutive points
 //
@@ -323,34 +347,10 @@ var Measurement = (function() {
         sparams.material = this.lineMarkerMaterial.clone();
       }
       else if (type === Measurement.Types.contour) {
-        this.pnum = 3; // 3 sphere markers
-        this.snum = 1; // 1 contour Marker
+        this.pnum = 3; // 3 sphere markers: start, end, via
+        this.snum = 1; // 1 contour marker for the path
         this.ptype = Markers.Types.sphere;
         this.stype = Markers.Types.contour;
-
-        // true if selecting only the closest contour to the center of the circle
-        // subtended by the 3 primary markers
-        this.params.nearestContour = this.params.nearestContour || false;
-        // true if splitting the segment soup into an array of contiguous loops,
-        // and necessarily true if finding the nearest contour
-        this.params.splitContours = this.params.nearestContour || this.params.splitContours || false;
-        // true if calculating manually and need to show an intermediate circle
-        // marker while the measurement hasn't been calculated
-        this.params.showPreviewMarker =
-          this.params.calculateManually && (this.params.showPreviewMarker || false);
-        // if showing preview circle marker, this is its radial offset from the
-        // computed circle subtended by the 3 primary markers
-        this.params.previewMarkerRadiusOffset = this.params.previewMarkerRadiusOffset || 0.0;
-        this.params.previewMarkerColor = this.params.previewMarkerColor || this.params.color;
-
-        // make a special preview marker if necessary
-        if (this.params.showPreviewMarker) {
-          this.previewMarker = Markers.create(Markers.Types.circle, {
-            name: "measurementMarkerPreview" + this.uuid
-          });
-          this.previewMarker.setColor(this.params.previewMarkerColor);
-          this.previewMarker.addToScene(scene);
-        }
 
         pparams.material = this.meshMarkerMaterial.clone();
         sparams.material = this.lineMarkerMaterial.clone();
@@ -611,81 +611,24 @@ var Measurement = (function() {
         this.result.ready = true;
       }
       else if (type === Measurement.Types.contour) {
-        // variables that determine the plane
-        var normal, point;
-
         var p0 = this.params.p[0];
         var p1 = this.params.p[1];
         var p2 = this.params.p[2];
 
-        // compute the circle parameters from three points
-        var circle = Calculate.circleFromThreePoints(p0, p1, p2);
+        // path from start (p0) to end (p1) through via (p2)
+        var path = Calculate.surfacePath(this.pointer.objects, p0, p2, p1, this.params.convexHull);
 
-        if (!circle) return;
+        if (!path) return;
 
-        normal = circle.normal;
-        point = circle.center;
-        
-        var plane = new Plane();
-
-        // set the plane
-        plane.setFromNormalAndCoplanarPoint(normal, point);
-
-        // having the plane, we can compute the cross-section
-        var contours = Calculate.crossSection(plane, this.pointer.objects, this.params.splitContours);
-
-        // if getting the nearest contour, retrieve it and use it as the measurement result
-        if (this.params.nearestContour) {
-          contours = [Calculate.nearestContourToPoints(contours, this.params.p)];
-        }
-
-        // final quantities
-        var segments = [];
-        var area = 0;
-        var length = 0;
-        var boundingBox = new THREE.Box3();
-
-        // accumulate the segment array
-        for (var c = 0, lc = contours.length; c < lc; c++) {
-          arrayAppend(segments, contours[c].segments);
-        }
-
-        // if computing the convex hull, get the result from that
-        if (this.params.convexHull) {
-          var hull = Calculate.planarConvexHull(plane, segments);
-
-          if (hull) {
-            segments = hull.segments;
-            area = hull.area;
-            length = hull.length;
-            boundingBox = hull.boundingBox;
-          }
-        }
-          
-        // else, just accumulate the final bounding box, area, and length
-        else {
-          for (var c = 0, lc = contours.length; c < lc; c++) {
-            var contour = contours[c];
-
-            boundingBox.expandByPoint(contour.boundingBox.min);
-            boundingBox.expandByPoint(contour.boundingBox.max);
-
-            area += contour.area;
-            length += contour.length;
-          }
-        }
-
-        // set the contour marker from the segment array
+        // set the contour marker from the path segments
         if (this.smarkers && this.smarkers.length > 0) {
-          this.smarkers[0].setFromSegments(segments);
+          this.smarkers[0].setFromSegments(path.segments);
         }
 
         // fill the measurement result
-        this.result.area = area;
-        this.result.boundingBox = boundingBox;
-        this.result.length1 = length;
-        this.result.length2 = contours;
-        this.result.length3 = contours + length;
+        this.result.length = path.length;
+        this.result.straightLength = p0.distanceTo(p1);
+        this.result.boundingBox = path.boundingBox;
         this.result.ready = true;
       }
       else if (type === Measurement.Types.angle) {
@@ -992,6 +935,12 @@ var Measurement = (function() {
       if (this.params.type === Measurement.Types.length) {
         result.length *= f;
       }
+      else if (this.params.type === Measurement.Types.contour) {
+        result.length *= f;
+        result.straightLength *= f;
+        result.boundingBox.min.sub(point).multiplyScalar(f).add(point);
+        result.boundingBox.max.sub(point).multiplyScalar(f).add(point);
+      }
       else if (this.params.type === Measurement.Types.circle) {
         result.radius *= f;
         result.diameter *= f;
@@ -1045,7 +994,8 @@ var Measurement = (function() {
         this.result.center.add(delta);
       }
       else if (this.params.type === Measurement.Types.crossSection
-        || this.params.type === Measurement.Types.orientedCrossSection) {
+        || this.params.type === Measurement.Types.orientedCrossSection
+        || this.params.type === Measurement.Types.contour) {
         this.result.boundingBox.translate(delta);
       }
     }
