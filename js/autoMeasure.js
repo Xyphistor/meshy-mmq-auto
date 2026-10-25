@@ -1384,11 +1384,121 @@ var AutoMeasure = (function() {
 
 
 
+  // saving and loading
+
+  var FILE_FORMAT = "meshy-auto-measure";
+  var FILE_VERSION = 1;
+
+  function round(v, places) {
+    var f = Math.pow(10, places);
+
+    return Math.round(v * f) / f;
+  }
+
+  // data to save to a file: landmarks are in mm relative to the minimum
+  // corner of the scan's bounding box, so they still line up if the scan is
+  // imported in a different place; the measurements are for reference only
+  // params:
+  //  name: report name
+  //  filename: scan filename
+  //  sliceMesh, landmarks, results
+  function saveData(params) {
+    var min = params.sliceMesh.min;
+    var size = params.sliceMesh.max.clone().sub(min);
+    var landmarks = {};
+
+    for (var key in LandmarkNames) {
+      var p = params.landmarks[key];
+      if (!p) continue;
+
+      landmarks[key] = [round(p.x - min.x, 2), round(p.y - min.y, 2), round(p.z - min.z, 2)];
+    }
+
+    return {
+      format: FILE_FORMAT,
+      version: FILE_VERSION,
+      saved: new Date().toISOString(),
+      name: params.name || "",
+      scan: params.filename || "",
+      units: "mm",
+      scanSize: [round(size.x, 2), round(size.y, 2), round(size.z, 2)],
+      midX: round(params.landmarks.midX - min.x, 2),
+      landmarks: landmarks,
+      measurementsCm: params.results.map(function(result) {
+        return {
+          key: result.key,
+          name: result.name,
+          value: result.value === null ? null : round(result.value / 10, 1)
+        };
+      })
+    };
+  }
+
+  // landmarks from saved data, placed on the given scan; any missing from the
+  // file are found automatically
+  // returns { landmarks, name, scan, sizeDifference } where sizeDifference is
+  // the largest difference in mm between the saved and current scan sizes
+  function loadData(sliceMesh, data) {
+    if (!data || data.format !== FILE_FORMAT || !data.landmarks) {
+      throw new Error("This isn't an Auto Measure file.");
+    }
+
+    if (data.version > FILE_VERSION) {
+      throw new Error("This file was saved by a newer version of Auto Measure.");
+    }
+
+    var min = sliceMesh.min;
+    var size = sliceMesh.max.clone().sub(min);
+    var landmarks = {};
+    var missing = false;
+
+    for (var key in LandmarkNames) {
+      var p = data.landmarks[key];
+
+      if (p && p.length === 3) {
+        landmarks[key] = new Vector3(p[0] + min.x, p[1] + min.y, p[2] + min.z);
+      }
+      else missing = true;
+    }
+
+    if (typeof data.midX === "number") landmarks.midX = data.midX + min.x;
+    else missing = true;
+
+    if (missing) {
+      var found = findLandmarks(sliceMesh);
+
+      for (var k in found) {
+        if (landmarks[k] === undefined) landmarks[k] = found[k];
+      }
+    }
+
+    var sizeDifference = 0;
+
+    if (data.scanSize && data.scanSize.length === 3) {
+      sizeDifference = Math.max(
+        Math.abs(data.scanSize[0] - size.x),
+        Math.abs(data.scanSize[1] - size.y),
+        Math.abs(data.scanSize[2] - size.z)
+      );
+    }
+
+    return {
+      landmarks: landmarks,
+      name: data.name || "",
+      scan: data.scan || "",
+      sizeDifference: sizeDifference
+    };
+  }
+
+
+
   return {
     SliceMesh: SliceMesh,
     findLandmarks: findLandmarks,
     measure: measure,
     reportHTML: reportHTML,
+    saveData: saveData,
+    loadData: loadData,
     tape: tape,
     Definitions: Definitions,
     LandmarkNames: LandmarkNames

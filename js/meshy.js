@@ -1458,6 +1458,8 @@ Meshy.prototype.buildAutoMeasureFolder = function() {
 
   this.autoMeasureFolder.add(this, "autoMeasureRun").name("Measure")
     .title("Find the landmarks and measure the torso.");
+  this.autoMeasureFolder.add(this, "autoMeasureLoad").name("Load measurements")
+    .title("Load landmarks saved from this scan with Save measurements.");
 
   if (!this.autoMeasure) return;
 
@@ -1476,19 +1478,27 @@ Meshy.prototype.buildAutoMeasureFolder = function() {
     .title("Name shown on the report, e.g. the customer or job.");
   this.autoMeasureFolder.add(this, "autoMeasurePrintReport").name("Print report")
     .title("Open a printable report of the measurements in cm.");
+  this.autoMeasureFolder.add(this, "autoMeasureSave").name("Save measurements")
+    .title("Save the landmarks and measurements to a file, to load again later with this scan.");
   this.autoMeasureFolder.add(this, "autoMeasureClear").name("Clear")
     .title("Remove the automatic measurements.");
 }
-Meshy.prototype.autoMeasureRun = function() {
+// returns true if the model can be measured, else warns
+Meshy.prototype.autoMeasureCanMeasure = function() {
   if (this.sliceModeOn) {
     this.printout.warn("Cannot measure mesh while slice mode is on.");
-    return;
+    return false;
   }
 
   if (!this.model) {
     this.printout.warn("Import a scan to measure.");
-    return;
+    return false;
   }
+
+  return true;
+}
+Meshy.prototype.autoMeasureRun = function() {
+  if (!this.autoMeasureCanMeasure()) return;
 
   var sliceMesh, landmarks;
 
@@ -1501,6 +1511,12 @@ Meshy.prototype.autoMeasureRun = function() {
     return;
   }
 
+  this.autoMeasureStart(sliceMesh, landmarks);
+
+  this.printout.log("Measured. Choose a landmark under Move landmark to adjust it.");
+}
+// set up the measurements from the given landmarks
+Meshy.prototype.autoMeasureStart = function(sliceMesh, landmarks) {
   this.autoMeasureClear();
 
   this.autoMeasure = {
@@ -1519,8 +1535,93 @@ Meshy.prototype.autoMeasureRun = function() {
 
   this.autoMeasureUpdate();
   this.buildAutoMeasureFolder();
+}
+// save the landmarks and measurements to a JSON file
+Meshy.prototype.autoMeasureSave = function() {
+  var am = this.autoMeasure;
+  if (!am) return;
 
-  this.printout.log("Measured. Choose a landmark under Move landmark to adjust it.");
+  var data = AutoMeasure.saveData({
+    name: this.autoMeasureName,
+    filename: this.filename,
+    sliceMesh: am.sliceMesh,
+    landmarks: am.landmarks,
+    results: am.results
+  });
+
+  var base = (this.autoMeasureName || this.filename || "scan").replace(/\.(obj|stl)$/i, "");
+  var fname = base.replace(/[\\\/:*?"<>|]/g, "_") + " measurements.json";
+  var blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+
+  a.href = url;
+  a.download = fname;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  this.printout.log("Saved " + fname + ".");
+}
+// choose a JSON file saved by autoMeasureSave and load it onto the model
+Meshy.prototype.autoMeasureLoad = function() {
+  if (!this.autoMeasureCanMeasure()) return;
+
+  var _this = this;
+
+  if (!this.autoMeasureFileInput) {
+    var input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.style.display = "none";
+    input.onchange = function() {
+      var file = this.files[0];
+      this.value = "";
+      if (file) _this.autoMeasureLoadFile(file);
+    };
+    document.body.appendChild(input);
+    this.autoMeasureFileInput = input;
+  }
+
+  this.autoMeasureFileInput.click();
+}
+Meshy.prototype.autoMeasureLoadFile = function(file) {
+  var _this = this;
+  var reader = new FileReader();
+
+  reader.onload = function() {
+    if (!_this.autoMeasureCanMeasure()) return;
+
+    var sliceMesh, loaded;
+
+    try {
+      sliceMesh = new AutoMeasure.SliceMesh(_this.model.getMesh());
+      loaded = AutoMeasure.loadData(sliceMesh, JSON.parse(reader.result));
+    }
+    catch (e) {
+      _this.printout.error("Couldn't load " + file.name + ": " + e.message);
+      return;
+    }
+
+    if (loaded.name) _this.autoMeasureName = loaded.name;
+
+    _this.autoMeasureStart(sliceMesh, loaded.landmarks);
+
+    if (loaded.sizeDifference > 2) {
+      _this.printout.warn("These measurements were saved from a scan of a different size (by up to " +
+        loaded.sizeDifference.toFixed(0) + "mm), so the landmarks may be in the wrong place.");
+    }
+    if (loaded.scan && loaded.scan !== _this.filename) {
+      _this.printout.warn("These measurements were saved from " + loaded.scan + ".");
+    }
+
+    _this.printout.log("Loaded " + file.name + ".");
+  };
+
+  reader.readAsText(file);
 }
 // recalculate the measurements from the current landmarks
 Meshy.prototype.autoMeasureUpdate = function() {
