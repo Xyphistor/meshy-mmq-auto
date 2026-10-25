@@ -460,6 +460,28 @@ var AutoMeasure = (function() {
     return loops.length > 0 ? loops[0] : null;
   }
 
+  // the closest point on a closed loop to the given point, or null
+  function nearestOnLoop(loop, point) {
+    if (!loop) return null;
+
+    var points = loop.points;
+    var n = points.length;
+    var best = null;
+    var bestDist = Infinity;
+
+    for (var i = 0; i < n; i++) {
+      var p = new Line3(points[i], points[(i + 1) % n]).closestPointToPoint(point, true, new Vector3());
+      var d = p.distanceToSquared(point);
+
+      if (d < bestDist) {
+        bestDist = d;
+        best = p;
+      }
+    }
+
+    return best;
+  }
+
   // points where a closed loop crosses the line through the given point in
   // the given direction (both in the plane of the loop), sorted along the
   // direction
@@ -912,6 +934,9 @@ var AutoMeasure = (function() {
       return p || new Vector3(midX, sliceMesh.min.y, z);
     }
 
+    // waist points below the busts: nearest points on the waist line
+    var waistLoop = torsoLoop(sliceMesh, zWaist);
+
     return {
       midX: midX,
       cfNeck: cfNeck,
@@ -926,6 +951,8 @@ var AutoMeasure = (function() {
       bustR: bustR,
       underBust: levelPoint(zUnderBust),
       waist: levelPoint(zWaist),
+      waistBustL: nearestOnLoop(waistLoop, bustL),
+      waistBustR: nearestOnLoop(waistLoop, bustR),
       abdomen: levelPoint((zWaist + zHip) / 2),
       hip: levelPoint(zHip)
     };
@@ -1109,6 +1136,8 @@ var AutoMeasure = (function() {
     bustR: "Bust point (R)",
     underBust: "Under bust level",
     waist: "Waist level",
+    waistBustL: "Waist below bust (L)",
+    waistBustR: "Waist below bust (R)",
     abdomen: "Abdomen level",
     hip: "Hip level"
   };
@@ -1174,6 +1203,7 @@ var AutoMeasure = (function() {
 
     // lengths
 
+    var waistLoop = torsoLoop(sliceMesh, lm.waist.z);
     var waistFront = midlinePoint(lm.waist.z, back);
     var waistBack = midlinePoint(lm.waist.z, front);
 
@@ -1191,11 +1221,14 @@ var AutoMeasure = (function() {
 
       set("bustHeight" + s, toBust);
 
-      // waist directly below the bust point
-      var waistBelow = firstCrossing(torsoLoop(sliceMesh, lm.waist.z), new Vector3(bust.x, 0, lm.waist.z), back);
+      // straight down from the bust point to the waist point below it; the
+      // waist point is snapped to the waist line (and the landmark updated)
+      // so it follows the waist level if that's moved
+      var waistBust = nearestOnLoop(waistLoop, lm["waistBust" + s] || bust);
+      if (waistBust) lm["waistBust" + s] = waistBust;
 
       set("waistHeight" + s, attempt(function() {
-        return add(toBust, tape(sliceMesh, bust, waistBelow, Y, front));
+        return add(toBust, tape(sliceMesh, bust, waistBust, Y, front));
       }));
     });
 
